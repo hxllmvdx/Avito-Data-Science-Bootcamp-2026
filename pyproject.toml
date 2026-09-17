@@ -1,0 +1,29 @@
+[project]
+name = "avito-data-science-bootcamp-2026"
+version = "0.1.0"
+description = "Avito Data Science Bootcamp 2026"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+    { name = "hxllmvdx", email = "jigoku.tyan@gmail.com" }
+]
+dependencies = [
+    "elasticsearch>=8.13.0,<9.0.0",
+    "loro>=1.13.2",
+    "marimo>=0.24.2",
+    "polars>=1.38.1",
+    "pyzmq>=27.2.0",
+    "qdrant-client>=1.10.0,<2.0.0",
+    "scikit-learn>=1.4.0",
+    "torch>=2.2.0",
+    "tqdm>=4.66.0",
+    "transformers>=4.40.0",
+    "typing-extensions>=4.15.0",
+]
+
+[project.scripts]
+avito-data-science-bootcamp-2026 = "avito_data_science_bootcamp_2026:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
