@@ -1,9 +1,9 @@
-"""Text embedding module using cointegrated/rubert-tiny2 with hardware acceleration."""
+"""Модуль эмбеддера с дефолтным cointegrated/rubert-tiny2 с автоматическим выбором ускорителя."""
 
 from __future__ import annotations
 
 import logging
-from typing import Sequence
+from collections.abc import Sequence
 
 import numpy as np
 import torch
@@ -17,9 +17,11 @@ DEFAULT_MODEL_NAME = "cointegrated/rubert-tiny2"
 
 
 class TextEmbedder:
-    """Embedder using cointegrated/rubert-tiny2 with mean pooling and L2 normalization."""
+    """Эмбеддер, использующий cointegrated/rubert-tiny2 (либо кастомную модель) с mean pooling и L2 нормализацией."""
 
-    def __init__(self, model_name: str = DEFAULT_MODEL_NAME, device: str | None = None) -> None:
+    def __init__(
+        self, model_name: str = DEFAULT_MODEL_NAME, device: str | None = None
+    ) -> None:
         self.model_name = model_name
         self.device = self._resolve_device(device)
 
@@ -45,18 +47,22 @@ class TextEmbedder:
         show_progress_bar: bool = False,
         max_length: int = 128,
     ) -> np.ndarray:
-        """Encode a sequence of texts into L2-normalized 312-dim embedding vectors."""
+        """Кодировует последовательность текстов в L2-нормализованные 312-dim векторы-эмбеддинги."""
         all_embeddings: list[np.ndarray] = []
         n_samples = len(texts)
 
         iterator = range(0, n_samples, batch_size)
         if show_progress_bar:
-            iterator = tqdm(iterator, desc="Generating embeddings", total=(n_samples + batch_size - 1) // batch_size)
+            iterator = tqdm(
+                iterator,
+                desc="Generating embeddings",
+                total=(n_samples + batch_size - 1) // batch_size,
+            )
 
         with torch.no_grad():
             for start_idx in iterator:
                 batch_texts = list(texts[start_idx : start_idx + batch_size])
-                # Ensure empty or None strings are handled
+                # Убеждаемся, что пустые строки и None обработаны
                 batch_texts = [t if t and t.strip() else " " for t in batch_texts]
 
                 encoded_input = self.tokenizer(
@@ -68,16 +74,21 @@ class TextEmbedder:
                 ).to(self.device)
 
                 model_output = self.model(**encoded_input)
-                # Mean pooling with attention mask
-                token_embeddings = model_output[0]  # First element contains hidden state
+                # Mean pooling с attention mask
+                token_embeddings = model_output[
+                    0
+                ]  # Первый элемент содержит скрытое состояние
                 input_mask_expanded = (
-                    encoded_input["attention_mask"].unsqueeze(-1).expand(token_embeddings.size()).float()
+                    encoded_input["attention_mask"]
+                    .unsqueeze(-1)
+                    .expand(token_embeddings.size())
+                    .float()
                 )
                 sum_embeddings = torch.sum(token_embeddings * input_mask_expanded, 1)
                 sum_mask = torch.clamp(input_mask_expanded.sum(1), min=1e-9)
                 embeddings = sum_embeddings / sum_mask
 
-                # Normalize embeddings to unit length (cosine distance)
+                # Нормализация эмбеддингов до единиц измерения (косинусная близость)
                 normalized = F.normalize(embeddings, p=2, dim=1)
                 all_embeddings.append(normalized.cpu().numpy().astype(np.float32))
 

@@ -1,9 +1,10 @@
-"""Hybrid search engine combining Elasticsearch, Qdrant, and RRF."""
+"""Гибридный поиск, комбинирующий Elasticsearch, Qdrant, и RRF."""
 
 from __future__ import annotations
 
 import logging
-from typing import Any, Sequence
+from collections.abc import Sequence
+from typing import Any
 
 import numpy as np
 from qdrant_client.models import (
@@ -29,15 +30,15 @@ logger = logging.getLogger(__name__)
 
 
 def compute_frequent_words(texts: Sequence[str], max_df: float = 0.5) -> set[str]:
-    """Compute words that occur in more than max_df (50%) of documents using CountVectorizer."""
+    """Считает частые слова, которые есть в max_df (50%) документов, с использование CountVectorizer."""
     from sklearn.feature_extraction.text import CountVectorizer
 
     sample = texts[:50000] if len(texts) > 50000 else texts
     vec = CountVectorizer(min_df=2, max_df=1.0)
     X = vec.fit_transform(sample)
-    n_docs = X.shape[0]
+    n_docs = X.shape[0]  # pyright: ignore[reportOptionalSubscript, reportAttributeAccessIssue]
 
-    doc_freqs = np.diff(X.tocsc().indptr)
+    doc_freqs = np.diff(X.tocsc().indptr)  # pyright: ignore[reportAttributeAccessIssue]
     stopword_indices = np.where(doc_freqs > max_df * n_docs)[0]
     inv_vocab = {v: k for k, v in vec.vocabulary_.items()}
     frequent_words = {inv_vocab[idx] for idx in stopword_indices}
@@ -45,7 +46,7 @@ def compute_frequent_words(texts: Sequence[str], max_df: float = 0.5) -> set[str
 
 
 class Searcher:
-    """Hybrid searcher combining Elasticsearch (BM25) and Qdrant (dense vector) via RRF."""
+    """Гибридный поиск, комбинирующий Elasticsearch (BM25) и Qdrant (глубокий поиск) с RRF."""
 
     def __init__(
         self,
@@ -71,10 +72,10 @@ class Searcher:
         is_delivery: bool = False,
         size: int = 800,
     ) -> dict[str, Any]:
-        """Build Elasticsearch query."""
+        """Строит запрос в Elasticsearch."""
         should_clauses: list[dict[str, Any]] = []
 
-        # 1. Main multi_match
+        # 1. Главный мульти-метч
         clean_search_query = search_query.strip()
         if clean_search_query:
             should_clauses.append(
@@ -86,7 +87,7 @@ class Searcher:
                 }
             )
 
-        # 2. Terms on params_keys with boost 4
+        # 2. Terms-запрос на params_keys (распаршенных ключах фильтров) с 4x бустом
         param_keys = list(q_params.keys())
         if param_keys:
             should_clauses.append(
@@ -98,7 +99,7 @@ class Searcher:
                 }
             )
 
-        # 3. For each key, terms by param_<slug> with boost 3
+        # 3. Для каждого ключа, terms-запрос по param_<slug> с 3х бустом
         for k, vals in q_params.items():
             if vals:
                 slug_field = f"param_{to_slug(k)}"
@@ -111,7 +112,7 @@ class Searcher:
                     }
                 )
 
-        # 4. Words in description: multi_match description^3, title^2
+        # 4. Слова из поля `Слова в описании`: multi_match description^3, title^2
         if special_params.description_words:
             valid_words = [
                 w
@@ -129,8 +130,8 @@ class Searcher:
                     }
                 )
 
-        # 5. Location boost (crucial for classifieds: 84% match).
-        # Skipped for delivery searches: item location is weakly tied to them.
+        # 5. Буст по локации
+        # Пропущен для запросов с доставкой: локация объявления мало влияет на них
         if (
             not is_delivery
             and location_id is not None
@@ -147,14 +148,14 @@ class Searcher:
                 }
             )
 
-        # 6. Filters
+        # 6. Фильтр по рейтингу
         filter_clauses: list[dict[str, Any]] = []
         if special_params.min_rating is not None:
             filter_clauses.append(
                 {"range": {"rating": {"gte": special_params.min_rating}}}
             )
 
-        # Category filter if provided and not 0
+        # Фильтр по макро категории, если он есть и не 0
         if category_id is not None and str(category_id) not in ("0", ""):
             filter_clauses.append({"term": {"category_id": str(category_id)}})
 
@@ -166,9 +167,9 @@ class Searcher:
         if filter_clauses:
             query_body["bool"]["filter"] = filter_clauses
 
-        # Price sort is intentionally NOT applied here: sorting 400 candidates by
-        # price before _score would drop relevant mid-price items from the pool.
-        # Price re-sorting happens later inside the final top-50 (see search_batch).
+        # Сортировка по цене намеренно не применяется тут: сортировка кандидатов по
+        # по цене до _score уронит релевантные средне-ценовые объявления в топе.
+        # Сортировка по цене происходит позже на финальных топ-50 (см search_batch).
         es_sort: list[Any] = ["_score"]
 
         return {
@@ -185,7 +186,7 @@ class Searcher:
         location_id: Any = None,
         category_id: Any = None,
     ) -> Filter | None:
-        """Build Qdrant Filter from query params, category, rating, and location."""
+        """Строит Qdrant Filter из параметров запроса: category, rating, и location."""
         must_conditions: list[Any] = []
 
         if special_params.min_rating is not None:
@@ -227,7 +228,7 @@ class Searcher:
         top_k: int = 50,
         candidate_size: int = 800,
     ) -> list[list[str]]:
-        """Perform batched search across ES and Qdrant in single HTTP calls."""
+        """Делает батчевый поиск по ES и Qdrant в единых HTTP запросах."""
         batch_size = len(batch_queries)
         if batch_size == 0:
             return []
@@ -247,7 +248,7 @@ class Searcher:
             )
         ]
 
-        # 1. Parse params for each query in batch
+        # 1. Парсим параметры для каждого запроса в батче
         parsed_batch: list[tuple[dict[str, list[str]], SpecialParams]] = []
         for p_text in batch_params_texts:
             raw_text = p_text or ""
@@ -255,7 +256,7 @@ class Searcher:
             reg_params, special = extract_special_params(p_dict)
             parsed_batch.append((reg_params, special))
 
-        # 2. Build and execute batch Elasticsearch search (msearch)
+        # 2. Строим и производим батчевый поиск по Elasticsearch (msearch)
         es_searches: list[dict[str, Any]] = []
         for i in range(batch_size):
             q_text = batch_queries[i]
@@ -284,10 +285,10 @@ class Searcher:
             logger.error(f"ES msearch failed: {e}")
             es_batch_results = [[] for _ in range(batch_size)]
 
-        # 3. Build and execute batch Qdrant search (query_batch_points)
-        # Single dense pass per query:
-        # Category + rating in must, plus location_id in must for non-delivery
-        # queries with valid location.
+        # 3. Строим запрос и выполняем батчевый поиск по Qdrant (query_batch_points)
+        # Один глубокий проход для запроса:
+        # Категория + рейтинг в must, плюс location_id в must
+        # для запросов без доставки с валидной локацией
         qdrant_requests: list[QueryRequest] = []
         for i in range(batch_size):
             reg_params, special = parsed_batch[i]
@@ -336,7 +337,7 @@ class Searcher:
             logger.error(f"Qdrant query_batch_points failed: {e}")
             qdrant_batch_results = [[] for _ in range(batch_size)]
 
-        # 4. Symmetric RRF and Special Sort for each query
+        # 4. Симметричный RRF и Special Sort для каждого запроса
         results: list[list[str]] = []
         for i in range(batch_size):
             _, special = parsed_batch[i]
@@ -365,7 +366,7 @@ class Searcher:
         k: int = 30,
         top: int = 50,
     ) -> list[str]:
-        """Reciprocal Rank Fusion on multiple ranked lists of (item_id, score)."""
+        """Reciprocal Rank Fusion на нескольких ранжированнных списках из (item_id, score)."""
         scores: dict[str, float] = {}
         for rl in rank_lists:
             for rank, (item_id, _) in enumerate(rl):
@@ -379,7 +380,7 @@ class Searcher:
         search_infm_params_text: str | None,
         top_k: int = 50,
     ) -> list[str]:
-        """Execute single search query."""
+        """Выполняет единичный поиск по запросу."""
         raw_params_text = search_infm_params_text or ""
         embed_text = f"{search_query} {raw_params_text}".strip()
         query_vector = self.embedder.encode([embed_text], show_progress_bar=False)

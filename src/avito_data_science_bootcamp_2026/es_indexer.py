@@ -1,9 +1,10 @@
-"""Elasticsearch indexer class managing mapping, indexing, and health checks."""
+"""Elasticsearch класс, управляющий сохранением индексов."""
 
 from __future__ import annotations
 
 import logging
-from typing import Any, Generator, Sequence
+from collections.abc import Generator, Sequence
+from typing import Any
 
 import polars as pl
 from elasticsearch import Elasticsearch
@@ -17,15 +18,17 @@ INDEX_NAME = "avito_items"
 
 
 class ESIndexer:
-    """Manages Elasticsearch operations for Avito benchmark items."""
+    """Управляет операциями Elasticsearch для benchmark items."""
 
-    def __init__(self, es_url: str = DEFAULT_ES_URL, index_name: str = INDEX_NAME) -> None:
+    def __init__(
+        self, es_url: str = DEFAULT_ES_URL, index_name: str = INDEX_NAME
+    ) -> None:
         self.es_url = es_url
         self.index_name = index_name
         self.client = Elasticsearch(self.es_url, request_timeout=60)
 
     def check_health(self) -> bool:
-        """Check if Elasticsearch is healthy."""
+        """Проверяет доступность Elasticsearch."""
         try:
             health = self.client.cluster.health()
             status = health.get("status")
@@ -36,7 +39,7 @@ class ESIndexer:
             return False
 
     def get_mapping(self, param_slug_cols: Sequence[str]) -> dict[str, Any]:
-        """Generate ES mapping according to task specification."""
+        """Генерирует ES маппинг."""
         properties: dict[str, Any] = {
             "item_id": {"type": "keyword"},
             "title": {"type": "text", "analyzer": "russian"},
@@ -52,7 +55,7 @@ class ESIndexer:
             "location": {"type": "geo_point", "ignore_malformed": True},
         }
 
-        # Add param_<slug> keyword fields
+        # Добавляем param_<slug> keyword-поля
         for slug_col in param_slug_cols:
             properties[slug_col] = {"type": "keyword"}
 
@@ -60,7 +63,7 @@ class ESIndexer:
             "settings": {
                 "number_of_shards": 1,
                 "number_of_replicas": 0,
-                "refresh_interval": "-1",  # speed up bulk indexing
+                "refresh_interval": "-1",  # ускоряем индексирование
             },
             "mappings": {
                 "properties": properties,
@@ -68,14 +71,16 @@ class ESIndexer:
         }
 
     def _load_up(self, items_df: pl.DataFrame, chunk_size: int = 2000) -> None:
-        """Recreate mapping and index all items."""
+        """Пересоздает маппинг и индексирует все объявления."""
         if not self.check_health():
             raise ConnectionError(
                 f"Elasticsearch is not available at {self.es_url}. Make sure docker-compose services are running."
             )
 
         param_slug_cols = [c for c in items_df.columns if c.startswith("param_")]
-        logger.info(f"Setting up Elasticsearch index '{self.index_name}' with {len(param_slug_cols)} param fields...")
+        logger.info(
+            f"Setting up Elasticsearch index '{self.index_name}' with {len(param_slug_cols)} param fields..."
+        )
 
         if self.client.indices.exists(index=self.index_name):
             logger.info(f"Deleting existing index '{self.index_name}'...")
@@ -85,16 +90,22 @@ class ESIndexer:
         self.client.indices.create(index=self.index_name, body=mapping)
         logger.info(f"Index '{self.index_name}' created successfully")
 
-        # Convert dataframe columns to python structures for fast iterator
+        # Конвертируем колонки датафремов в Python-объекты для быстрой итерации
         item_ids = items_df["item_id"].to_list()
         titles = items_df["item_title_raw"].fill_null("").to_list()
         descriptions = items_df["item_description_raw"].fill_null("").to_list()
         params_flats = items_df["params_flat"].fill_null("").to_list()
         params_keys = items_df["params_keys"].to_list()
 
-        category_ids = items_df["item_category_id"].cast(pl.Utf8).fill_null("").to_list()
-        microcat_ids = items_df["item_microcat_id"].cast(pl.Utf8).fill_null("").to_list()
-        location_ids = items_df["item_location_id"].cast(pl.Utf8).fill_null("").to_list()
+        category_ids = (
+            items_df["item_category_id"].cast(pl.Utf8).fill_null("").to_list()
+        )
+        microcat_ids = (
+            items_df["item_microcat_id"].cast(pl.Utf8).fill_null("").to_list()
+        )
+        location_ids = (
+            items_df["item_location_id"].cast(pl.Utf8).fill_null("").to_list()
+        )
 
         prices = items_df["item_price"].fill_null(0.0).to_list()
         ratings = items_df["item_rating"].fill_null(0.0).to_list()
@@ -156,7 +167,6 @@ class ESIndexer:
         progress.close()
         logger.info(f"Indexing completed: {success_count}/{n_items} indexed")
 
-        # Restore refresh interval and refresh index
         self.client.indices.put_settings(
             index=self.index_name,
             body={"index": {"refresh_interval": "1s"}},

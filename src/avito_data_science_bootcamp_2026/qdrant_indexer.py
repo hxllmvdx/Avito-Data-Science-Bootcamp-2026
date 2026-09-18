@@ -1,14 +1,13 @@
-"""Qdrant indexer class managing collection creation, payload indexing, and vector upload."""
+"""Класс, управляющий созданием, индексацией payload и загрузкой векторов в Qdrant"""
 
 from __future__ import annotations
 
 import logging
-from typing import Any, Sequence
+from typing import Any
 
 import numpy as np
 import polars as pl
 from qdrant_client import QdrantClient
-from qdrant_client.http import models
 from qdrant_client.models import Distance, PayloadSchemaType, PointStruct, VectorParams
 from tqdm import tqdm
 
@@ -22,7 +21,7 @@ VECTOR_DIM = 312
 
 
 class QdrantIndexer:
-    """Manages Qdrant vector database operations for Avito benchmark items."""
+    """Управляет операциями векторной ДБ Qdrant для benchmark items."""
 
     def __init__(
         self,
@@ -32,11 +31,13 @@ class QdrantIndexer:
         self.qdrant_url = qdrant_url
         self.collection_name = collection_name
         self.client = QdrantClient(
-            url=self.qdrant_url, timeout=60.0, check_compatibility=False
+            url=self.qdrant_url,
+            timeout=60.0,  # pyright: ignore[reportArgumentType]
+            check_compatibility=False,
         )
 
     def check_health(self) -> bool:
-        """Check if Qdrant is accessible."""
+        """Проверяет, доступен ли Qdrant."""
         try:
             self.client.get_collections()
             return True
@@ -52,7 +53,7 @@ class QdrantIndexer:
         embed_batch_size: int = 512,
         embeddings_cache_path: Any = None,
     ) -> None:
-        """Recreate collection, build embeddings, and upload vectors with payload."""
+        """Пересоздает коллекцию, строит эмбеддинги и загружает векторы с payload"""
         if not self.check_health():
             raise ConnectionError(
                 f"Qdrant is not available at {self.qdrant_url}. Make sure docker-compose services are running."
@@ -66,7 +67,7 @@ class QdrantIndexer:
             vectors_config=VectorParams(size=VECTOR_DIM, distance=Distance.COSINE),
         )
 
-        # Create payload indexes for fast filtering and sorting
+        # Создаем payload-индексы для быстрой фильтрации и сортировки
         self.client.create_payload_index(
             collection_name=self.collection_name,
             field_name="rating",
@@ -91,10 +92,9 @@ class QdrantIndexer:
         param_slug_cols = [c for c in items_df.columns if c.startswith("param_")]
         n_items = len(items_df)
 
-        # 1. Compute or load embeddings for text_for_embed
+        # 1. Считаем или грузим эмбеддинги для text_for_embed
         embeddings: np.ndarray | None = None
         if embeddings_cache_path:
-            import os
             from pathlib import Path
 
             cache_p = Path(embeddings_cache_path)
@@ -120,7 +120,7 @@ class QdrantIndexer:
                 cache_p.parent.mkdir(parents=True, exist_ok=True)
                 np.save(cache_p, embeddings)
 
-        # 2. Prepare payload structures
+        # 2. Готовим payload структуры
         item_ids = items_df["item_id"].to_list()
         category_ids = (
             items_df["item_category_id"].cast(pl.Utf8).fill_null("").to_list()
@@ -133,7 +133,7 @@ class QdrantIndexer:
 
         slug_data = {col: items_df[col].to_list() for col in param_slug_cols}
 
-        # 3. Upload to Qdrant using integer index IDs (or UUIDs) while storing item_id in payload
+        # 3. Грузим в Qdrant используя сохраняя целочисленные ID индексов, храня item_id в payload
         logger.info(
             f"Uploading points to Qdrant collection in batches of {batch_size}..."
         )
@@ -156,7 +156,7 @@ class QdrantIndexer:
                     if val_list:
                         payload[col] = val_list
 
-                # Qdrant accepts unsigned 64-bit integer point IDs or UUIDs
+                # Qdrant принимает целочисленные 64-битные беззнаковые точки
                 point = PointStruct(
                     id=i,
                     vector=embeddings[i].tolist(),

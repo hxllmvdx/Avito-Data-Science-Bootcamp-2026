@@ -1,4 +1,4 @@
-"""Main execution pipeline for hybrid search and evaluation."""
+"""Точка входа пайплайна гибридного поиска и оценке на отложенных запросах."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import os
 import warnings
 from pathlib import Path
 
-# Suppress library warnings and noisy outputs
+# Просто глушу вывод библиотек
 warnings.filterwarnings("ignore")
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ["TRANSFORMERS_VERBOSITY"] = "error"
@@ -47,7 +47,7 @@ def evaluate_recall(
     predictions: dict[str, list[str]],
     ground_truth: dict[str, set[str]],
 ) -> float:
-    """Compute Recall@50 = mean_over_queries( |top50 & relevant| / |relevant| )."""
+    """Считает на отложенных запросах Recall@50 = mean_over_queries( |top50 & relevant| / |relevant| )."""
     recalls: list[float] = []
     for qid, relevant_set in ground_truth.items():
         if not relevant_set:
@@ -63,7 +63,7 @@ def evaluate_recall(
 
 
 def run_pipeline() -> None:
-    """Execute the complete indexing, validation, and benchmarking pipeline."""
+    """Запускает индексацию, валидацию и сохранение артифактов."""
     base_dir = Path(__file__).resolve().parent.parent.parent
     data_dir = base_dir / "data"
     output_dir = base_dir / "output"
@@ -86,7 +86,7 @@ def run_pipeline() -> None:
     if not model_path.exists():
         raise FileNotFoundError(f"Finetuned model dir not fountd at {model_path}")
 
-    # 1. Initialize and verify DB connections
+    # 1. Инициализация и проверка доступности баз данных
     es_indexer = ESIndexer()
     qdrant_indexer = QdrantIndexer()
 
@@ -101,7 +101,7 @@ def run_pipeline() -> None:
             "Please ensure services are running: docker compose up -d"
         )
 
-    # 2. Load and preprocess items
+    # 2. Загрузка и предобработка объявлений
     items_raw_df = pl.read_parquet(items_path)
     items_df = preprocess_items_df(items_raw_df, cache_path=cached_items_path)
 
@@ -112,12 +112,12 @@ def run_pipeline() -> None:
         )
     )
 
-    # 3. Initialize Embedder
+    # 3. Инстанс энкодера
     embedder = TextEmbedder(str(model_path.absolute()))
 
     cached_embeddings_path = data_dir / "item_embeddings.npy"
 
-    # 4. Index documents in ES and Qdrant
+    # 4. Индексация объектов в ElasticSearch и Qdrant
     es_indexer._load_up(items_df)
     qdrant_indexer._load_up(
         items_df,
@@ -125,7 +125,7 @@ def run_pipeline() -> None:
         embeddings_cache_path=cached_embeddings_path,
     )
 
-    # 5. Frequent words for 'Слова в описании' filter
+    # 5. Частые слова для фильтра 'Слова в описании'
     frequent_words = compute_frequent_words(
         items_df["item_description_raw"].fill_null("").to_list()
     )
@@ -138,7 +138,7 @@ def run_pipeline() -> None:
         frequent_words=frequent_words,
     )
 
-    # 6. Validation on train.parquet (2000 sampled queries)
+    # 6. Валидация train.parquet (2000 засемпленных запросов)
     if train_path.exists():
         train_df = pl.read_parquet(train_path)
 
@@ -155,14 +155,14 @@ def run_pipeline() -> None:
             ]
         ).agg(pl.col("item_id").alias("relevant_items"))
 
-        # Sample 2000 queries for fast and representative evaluation
+        # Семплим 2000 для быстрой и репрезентативной оценки
         n_sample = min(2000, len(unique_train_queries))
         eval_train_queries = unique_train_queries.sample(n=n_sample, seed=42)
 
         train_query_rows = eval_train_queries.to_dicts()
         n_train = len(train_query_rows)
 
-        # Pre-embed clean query texts in batches
+        # Заранее строим эмбеддинги запросов батчами
         all_train_embed_texts = [
             f"{r['search_query'] or ''} {r['search_infm_params_text'] or ''}".strip()
             for r in train_query_rows
@@ -211,14 +211,14 @@ def run_pipeline() -> None:
         train_recall = evaluate_recall(train_predictions, ground_truth)
         tqdm.write(f"TRAIN Recall@50: {train_recall:.4f}")
 
-        # Save train_predictions.csv
+        # Сохраняем train_predictions.csv для возможности проанализировать результат
         with open(train_preds_path, "w", encoding="utf-8", newline="") as f:
             writer = csv.writer(f)
             writer.writerow(["query_id", "answer"])
             for qid, preds in train_predictions.items():
                 writer.writerow([qid, " ".join(preds[:50])])
 
-    # 7. Inference on benchmark_queries.parquet
+    # 7. Инференс на benchmark_queries.parquet
     bench_queries_df = pl.read_parquet(queries_path)
     bench_rows = bench_queries_df.to_dicts()
     n_bench = len(bench_rows)
@@ -265,7 +265,7 @@ def run_pipeline() -> None:
 
     pbar_bench.close()
 
-    # Save to output/answer.csv
+    # Сохранение в output/answer.csv
     with open(answer_path, "w", encoding="utf-8", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["query_id", "answer"])
@@ -274,7 +274,7 @@ def run_pipeline() -> None:
 
 
 def main() -> None:
-    """Entrypoint function."""
+    """Функция-точка входа."""
     run_pipeline()
 
 

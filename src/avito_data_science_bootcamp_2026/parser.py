@@ -1,4 +1,4 @@
-"""Parser and preprocessor for *_infm_params_text and items datasets."""
+"""Парсинг и предобработа полей *_infm_params_text."""
 
 from __future__ import annotations
 
@@ -52,15 +52,15 @@ SPECIAL_KEYS = {
 
 @dataclass
 class SpecialParams:
-    """Special parameters extracted from search query."""
+    """Специальные параметры, извлеченные из запроса."""
 
     sort_order: str | None = None  # "asc", "desc", or None
     min_rating: float | None = None  # e.g., 4.0 or None
-    description_words: list[str] | None = None  # raw words from 'Слова в описании'
+    description_words: list[str] | None = None  # слова из поля 'Слова в описании'
 
 
 def build_key_regex(keys: list[str]) -> re.Pattern:
-    """Build case-sensitive regex matching any of the title-case keys."""
+    """Строит чувствительные к регистру регулярные выражения для ключей"""
     keys_sorted = sorted(set(keys), key=len, reverse=True)
     pattern = "|".join(re.escape(k) for k in keys_sorted)
     return re.compile(rf"\b({pattern})")
@@ -70,27 +70,27 @@ KEY_REGEX = build_key_regex(RAW_KEYS)
 
 
 def _is_boundary_token(word: str) -> bool:
-    """Check if token marks the end of a parameter value."""
+    """Проверка того, является ли токен концом значения параметра"""
     if not word:
         return False
     first = word[0]
 
-    # Markers [поиск], {...} are boundaries
+    # Маркеры [поиск], {...} - границы
     if first in "[{":
         return True
 
-    # Non-uppercase first character is not a boundary
+    # Первые символы в нижнем регистре - не граница
     if not first.isupper():
         return False
 
-    # Acronyms: all uppercase letters, length <= 4 (ТО, BMW, ИП, ГБО, МКПП, ХВС)
+    # Аббревиатуры: все последовательные заглавные буквы длиной <= 4 (ТО, BMW, ИП, ГБО, МКПП, ХВС)
     letters = [c for c in word if c.isalpha()]
 
     return not (letters and all(c.isupper() for c in letters) and len(letters) <= 4)
 
 
 def _find_value_bounds(segment: str) -> tuple[int, int]:
-    """Find start and end of value in segment."""
+    """Ищет начало и конец значения параметра в куске текста."""
     if not segment.strip():
         return 0, 0
 
@@ -106,7 +106,7 @@ def _find_value_bounds(segment: str) -> tuple[int, int]:
 
 
 def parse_params(text: str, key_regex: re.Pattern = KEY_REGEX) -> dict[str, list[str]]:
-    """Key-value parser extracting parameter values while respecting title-case bounds."""
+    """Извлекает ключ-значение из параметров."""
     if not text:
         return {}
 
@@ -131,7 +131,10 @@ def parse_params(text: str, key_regex: re.Pattern = KEY_REGEX) -> dict[str, list
 
 
 def to_slug(key: str) -> str:
-    """Convert title-case key to slug: lower, spaces to _, remove non-alphanumeric/underscore."""
+    """
+    Конвертирует ключ, начинающийся с заглавной буквы: в нижний регистр, пробелы на _, убрать
+    все не буквы и не _.
+    """
     lowered = key.lower().strip()
     underscored = re.sub(r"[\s\-]+", "_", lowered)
     cleaned = re.sub(r"[^\w_]", "", underscored)
@@ -141,7 +144,7 @@ def to_slug(key: str) -> str:
 def extract_special_params(
     raw_params: dict[str, list[str]],
 ) -> tuple[dict[str, list[str]], SpecialParams]:
-    """Separate standard parameters from the three special keys."""
+    """Отделяет обычные параметры от специальных."""
     special = SpecialParams()
     regular_params: dict[str, list[str]] = {}
 
@@ -175,9 +178,9 @@ def extract_special_params(
 def preprocess_items_df(
     items_df: pl.DataFrame, cache_path: Path | None = None
 ) -> pl.DataFrame:
-    """Parse item_infm_params_text, build params_flat, params_keys, and param_<slug> fields.
-
-    Saves to parquet cache if cache_path is provided.
+    """
+    Парсит поля item_infm_params_text, build params_flat, params_keys, и param_<slug>.
+    Сохраняет в .parquet, если указан cache_path.
     """
     if cache_path and cache_path.exists():
         logger.info(f"Loading cached preprocessed items from {cache_path}")
@@ -190,7 +193,7 @@ def preprocess_items_df(
     for text in raw_texts:
         all_parsed.append(parse_params(text, KEY_REGEX))
 
-    # Identify all slugs from non-special keys
+    # Определяем все слаги из не специальных ключей
     all_slug_keys: set[str] = set()
     for d in all_parsed:
         for k in d:
@@ -208,7 +211,7 @@ def preprocess_items_df(
     descriptions = items_df["item_description_raw"].fill_null("").to_list()
 
     for idx, d in enumerate(all_parsed):
-        # 1. params_keys and param_<slug>
+        # 1. params_keys и param_<slug>
         item_keys: list[str] = []
         flat_parts: list[str] = []
         item_slug_vals: dict[str, list[str]] = {}
@@ -219,9 +222,9 @@ def preprocess_items_df(
             item_keys.append(k)
             slug = to_slug(k)
             item_slug_vals[slug] = vals
-            # Use the natural key (e.g. "Вид услуги") so that params_flat matches
-            # the format of search_infm_params_text on the query side — both for
-            # BM25 in ES and for the shared embedding space.
+            # Используем исходный ключ (например "Вид услуги") так, чтобы params_flat
+            # совпадал с форматом search_infm_params_text на стороне — и для
+            # BM25 в ES, и для пространства эмбеддингов.
             flat_parts.append(f"{k}: {' '.join(vals)}")
 
         params_flat = " | ".join(flat_parts)
@@ -232,10 +235,9 @@ def preprocess_items_df(
             slug_columns[slug].append(item_slug_vals.get(slug, []))
 
         # 2. text_for_embed = title + " " + params_flat + " " + description
-        # params_flat goes BEFORE the description snippet: with max_length=128
-        # tokens anything at the tail gets truncated, and params are more
-        # informative than the description tail. Full description is passed
-        # into text_for_embed.
+        # params_flat до description: с максимальной длиной 128 токенов,
+        # все в конце обрезается, а параметры более репрезентативны, чем
+        # описание.
         title = titles[idx]
         desc = descriptions[idx]
         text_for_embed = f"{title} {params_flat} {desc}".strip()
