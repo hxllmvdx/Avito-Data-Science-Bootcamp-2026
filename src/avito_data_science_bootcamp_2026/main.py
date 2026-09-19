@@ -195,7 +195,7 @@ def run_pipeline() -> None:
                 batch_categories=chunk_cats,
                 batch_is_delivery=chunk_delivery,
                 top_k=50,
-                candidate_size=400,
+                candidate_size=800,
             )
 
             for i, res_items in enumerate(batch_results):

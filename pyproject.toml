@@ -9,8 +9,10 @@ authors = [
 ]
 dependencies = [
     "elasticsearch>=8.13.0,<9.0.0",
+    "lightgbm>=4.7.0",
     "loro>=1.13.2",
     "marimo>=0.24.2",
+    "pandas>=3.0.6",
     "polars>=1.38.1",
     "pyzmq>=27.2.0",
     "qdrant-client>=1.10.0,<2.0.0",

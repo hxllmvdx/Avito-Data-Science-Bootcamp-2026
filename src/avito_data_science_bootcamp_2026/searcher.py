@@ -346,7 +346,7 @@ class Searcher:
                 qdrant_batch_results[i] if i < len(qdrant_batch_results) else []
             )
 
-            top_candidates = self.rrf([es_hits, qdrant_hits], k=70, top=top_k)
+            top_candidates = self.rrf([es_hits, qdrant_hits], k=30, top=top_k)
 
             if special.sort_order and top_candidates:
                 is_desc = special.sort_order == "desc"
