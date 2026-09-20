@@ -112,6 +112,24 @@ def run_pipeline() -> None:
         )
     )
 
+    # Число объявлений по локациям и локация каждого объявления — для условного
+    # снятия must-фильтра и локационного бонуса в Searcher.
+    loc_counts: dict[int, int] = {
+        int(loc): int(n)
+        for loc, n in items_df.group_by("item_location_id")
+        .agg(pl.len().alias("n"))
+        .select("item_location_id", "n")
+        .to_numpy()
+        .tolist()
+        if loc is not None
+    }
+    item_locations: dict[str, object] = dict(
+        zip(
+            items_df["item_id"].to_list(),
+            items_df["item_location_id"].to_list(),
+        )
+    )
+
     # 3. Инстанс энкодера
     embedder = TextEmbedder(str(model_path.absolute()))
 
@@ -136,6 +154,8 @@ def run_pipeline() -> None:
         embedder=embedder,
         item_prices=item_prices,
         frequent_words=frequent_words,
+        loc_counts=loc_counts,
+        item_locations=item_locations,
     )
 
     # 6. Валидация train.parquet (2000 засемпленных запросов)
@@ -145,19 +165,36 @@ def run_pipeline() -> None:
         indexed_item_ids = set(items_df["item_id"].to_list())
         train_filtered = train_df.filter(pl.col("item_id").is_in(indexed_item_ids))
 
-        unique_train_queries = train_filtered.group_by(
-            [
-                "search_query",
-                "search_infm_params_text",
-                "search_location_id",
-                "search_category",
-                "search_is_delivery_search",
-            ]
-        ).agg(pl.col("item_id").alias("relevant_items"))
+        # Порядок group_by в polars недетерминирован между процессами, поэтому
+        # сортируем перед sample: иначе позиционные qid (train_q_i) указывают на
+        # разные запросы от запуска к запуску и train_predictions.csv невоспроизводим.
+        group_keys = [
+            "search_query",
+            "search_infm_params_text",
+            "search_location_id",
+            "search_category",
+            "search_is_delivery_search",
+        ]
+        unique_train_queries = (
+            train_filtered.group_by(group_keys)
+            .agg(pl.col("item_id").alias("relevant_items"))
+            .sort(group_keys)
+        )
 
         # Семплим 2000 для быстрой и репрезентативной оценки
         n_sample = min(2000, len(unique_train_queries))
         eval_train_queries = unique_train_queries.sample(n=n_sample, seed=42)
+
+        # Сохраняем метаданные eval-среза, чтобы train_q_i можно было однозначно
+        # сджойнить с полями запроса и позитивами при анализе ошибок.
+        eval_meta_path = output_dir / "train_eval_queries.parquet"
+        eval_train_queries.with_columns(
+            pl.Series(
+                "query_id",
+                [f"train_q_{i}" for i in range(len(eval_train_queries))],
+                dtype=pl.Utf8,
+            )
+        ).write_parquet(eval_meta_path)
 
         train_query_rows = eval_train_queries.to_dicts()
         n_train = len(train_query_rows)

@@ -45,6 +45,23 @@ def compute_frequent_words(texts: Sequence[str], max_df: float = 0.5) -> set[str
     return frequent_words
 
 
+# Режим обработки локации в Qdrant-канале:
+# - "must": жёсткий фильтр location_id (как в исходном пайплайне);
+# - "no_must": фильтр не применяется никогда;
+# - "conditional": фильтр снимается, если в локации запроса мало/нет объявлений
+#   (loc_counts[loc] < LOCATION_POOL_THRESHOLD).
+LOCATION_MODE = "conditional"
+# Порог размера пула локации, ниже которого must-фильтр снимается (для conditional).
+LOCATION_POOL_THRESHOLD = 50
+# Вес Qdrant-канала при снятом must (ES-канал всегда весит 1.0). Для запросов с
+# большим пулом локации must сохраняется и вес Qdrant = 1.0.
+LOCATION_QD_WEIGHT = 0.3
+# Бонус к RRF-скору объявления, локация которого совпадает с локацией запроса.
+LOCATION_BONUS = 0.0
+# RRF-константа.
+RRF_K = 30
+
+
 class Searcher:
     """Гибридный поиск, комбинирующий Elasticsearch (BM25) и Qdrant (глубокий поиск) с RRF."""
 
@@ -55,12 +72,24 @@ class Searcher:
         embedder: TextEmbedder,
         item_prices: dict[str, float],
         frequent_words: set[str] | None = None,
+        loc_counts: dict[Any, int] | None = None,
+        item_locations: dict[str, Any] | None = None,
+        location_mode: str = LOCATION_MODE,
+        location_pool_threshold: int = LOCATION_POOL_THRESHOLD,
+        location_qd_weight: float = LOCATION_QD_WEIGHT,
+        location_bonus: float = LOCATION_BONUS,
     ) -> None:
         self.es_indexer = es_indexer
         self.qdrant_indexer = qdrant_indexer
         self.embedder = embedder
         self.item_prices = item_prices
         self.frequent_words = frequent_words or set()
+        self.loc_counts = loc_counts or {}
+        self.item_locations = item_locations or {}
+        self.location_mode = location_mode
+        self.location_pool_threshold = location_pool_threshold
+        self.location_qd_weight = location_qd_weight
+        self.location_bonus = location_bonus
 
     def build_es_query(
         self,
@@ -185,8 +214,14 @@ class Searcher:
         special_params: SpecialParams,
         location_id: Any = None,
         category_id: Any = None,
+        apply_location_filter: bool = True,
     ) -> Filter | None:
-        """Строит Qdrant Filter из параметров запроса: category, rating, и location."""
+        """Строит Qdrant Filter из параметров запроса: category, rating, и location.
+
+        apply_location_filter=False позволяет снять жёсткий must по локации
+        (используется для запросов без/с малым пулом локации), сохраняя фильтры
+        по рейтингу и категории.
+        """
         must_conditions: list[Any] = []
 
         if special_params.min_rating is not None:
@@ -205,7 +240,11 @@ class Searcher:
                 )
             )
 
-        if location_id is not None and str(location_id) not in ("0", ""):
+        if (
+            apply_location_filter
+            and location_id is not None
+            and str(location_id) not in ("0", "")
+        ):
             must_conditions.append(
                 FieldCondition(
                     key="location_id",
@@ -290,22 +329,23 @@ class Searcher:
         # Категория + рейтинг в must, плюс location_id в must
         # для запросов без доставки с валидной локацией
         qdrant_requests: list[QueryRequest] = []
+        apply_loc_filters: list[bool] = []
         for i in range(batch_size):
             reg_params, special = parsed_batch[i]
-            loc_id = (
-                locations[i]
-                if (
-                    not is_delivery[i]
-                    and locations[i] is not None
-                    and str(locations[i]) not in ("0", "")
-                )
-                else None
+            valid_loc = (
+                not is_delivery[i]
+                and locations[i] is not None
+                and str(locations[i]) not in ("0", "")
             )
+            loc_id = locations[i] if valid_loc else None
+            apply_loc = self.should_apply_location_filter(loc_id) if valid_loc else True
+            apply_loc_filters.append(apply_loc)
             q_filter = self.build_qdrant_filter(
                 reg_params,
                 special,
                 location_id=loc_id,
                 category_id=categories[i],
+                apply_location_filter=apply_loc,
             )
             qdrant_requests.append(
                 QueryRequest(
@@ -337,7 +377,7 @@ class Searcher:
             logger.error(f"Qdrant query_batch_points failed: {e}")
             qdrant_batch_results = [[] for _ in range(batch_size)]
 
-        # 4. Симметричный RRF и Special Sort для каждого запроса
+        # 4. Взвешенный RRF с локационным бонусом и Special Sort
         results: list[list[str]] = []
         for i in range(batch_size):
             _, special = parsed_batch[i]
@@ -346,19 +386,72 @@ class Searcher:
                 qdrant_batch_results[i] if i < len(qdrant_batch_results) else []
             )
 
-            top_candidates = self.rrf([es_hits, qdrant_hits], k=30, top=top_k)
-
-            if special.sort_order and top_candidates:
-                is_desc = special.sort_order == "desc"
-                top_candidates = sorted(
-                    top_candidates,
-                    key=lambda x: self.item_prices.get(x, 0.0),
-                    reverse=is_desc,
-                )
+            qd_weight = 1.0 if apply_loc_filters[i] else self.location_qd_weight
+            apply_bonus = (
+                not is_delivery[i]
+                and locations[i] is not None
+                and str(locations[i]) not in ("0", "")
+            )
+            top_candidates = self.weighted_rrf(
+                [es_hits, qdrant_hits],
+                weights=[1.0, qd_weight],
+                k=RRF_K,
+                top=top_k,
+                query_location=locations[i] if apply_bonus else None,
+            )
 
             results.append(top_candidates)
 
         return results
+
+    def should_apply_location_filter(self, location_id: Any) -> bool:
+        """Нужно ли применять жёсткий must-фильтр по локации для Qdrant.
+
+        В режиме conditional фильтр снимается, если в локации запроса меньше
+        location_pool_threshold объявлений корпуса (в т.ч. 0) — тогда must
+        отсекал бы весь dense-канал. В режимах must/no_must поведение
+        фиксировано.
+        """
+        if self.location_mode == "no_must":
+            return False
+        if self.location_mode == "must":
+            return True
+        # conditional
+        if location_id is None or str(location_id) in ("0", ""):
+            return True
+        pool = self.loc_counts.get(location_id, 0)
+        return pool >= self.location_pool_threshold
+
+    def weighted_rrf(
+        self,
+        rank_lists: list[list[tuple[str, float]]],
+        weights: list[float] | None = None,
+        k: int = 30,
+        top: int = 50,
+        query_location: Any = None,
+    ) -> list[str]:
+        """Взвешенный RRF с опциональным бонусом за совпадение локации.
+
+        Абсолютные скоры каналов не используются (как и в обычном RRF), поэтому
+        локационный бонус добавляется к итоговому RRF-скору.
+        """
+        if weights is None:
+            weights = [1.0] * len(rank_lists)
+        scores: dict[str, float] = {}
+        for rl, w in zip(rank_lists, weights):
+            if w == 0.0:
+                continue
+            for rank, (item_id, _) in enumerate(rl):
+                scores[item_id] = scores.get(item_id, 0.0) + w / (k + rank + 1)
+
+        if query_location is not None and str(query_location) not in ("0", ""):
+            q_loc = str(query_location)
+            for item_id in scores:
+                if str(self.item_locations.get(item_id)) == q_loc:
+                    scores[item_id] += self.location_bonus
+
+        sorted_items = sorted(scores.keys(), key=lambda x: scores[x], reverse=True)
+        return sorted_items[:top]
 
     @staticmethod
     def rrf(
